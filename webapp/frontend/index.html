@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Backtest Core</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/flatpickr/4.6.13/flatpickr.min.css" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="bg-grid"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">◆</span>
+    <span class="brand-name">BACKTEST<span class="accent">CORE</span></span>
+  </div>
+  <div class="brand-sub">bar-by-bar simulation engine — phase 2</div>
+  <div class="user-info" id="user-info" hidden>
+    <span class="user-email" id="user-email"></span>
+    <button class="logout-button" id="logout-button">Logout</button>
+  </div>
+</header>
+
+<div class="auth-gate" id="auth-gate" hidden>
+  <div class="auth-card">
+    <div class="brand" style="margin-bottom: 24px;">
+      <span class="brand-mark">◆</span>
+      <span class="brand-name">BACKTEST<span class="accent">CORE</span></span>
+    </div>
+    <h2 class="panel-title" id="auth-title">Sign In</h2>
+    <form id="auth-form">
+      <label class="field">
+        <span class="field-label">Email</span>
+        <input class="text-input" type="email" id="auth-email" required />
+      </label>
+      <label class="field">
+        <span class="field-label">Password</span>
+        <input class="text-input" type="password" id="auth-password" required minlength="8" />
+      </label>
+      <button type="submit" class="run-button" id="auth-submit"><span>SIGN IN</span></button>
+    </form>
+    <div id="auth-error" class="error-box" hidden></div>
+    <p class="auth-toggle">
+      <span id="auth-toggle-text">Need an account?</span>
+      <a href="#" id="auth-toggle-link">Register</a>
+    </p>
+  </div>
+</div>
+
+<main class="layout" id="main-layout" hidden>
+  <section class="panel config-panel">
+    <h2 class="panel-title">Configure Run</h2>
+
+    <form id="backtest-form">
+      <label class="field">
+        <span class="field-label">OHLCV Data File</span>
+        <div class="file-drop" id="file-drop">
+          <input type="file" id="data-file" name="data_file" accept=".csv" required />
+          <span id="file-drop-text">Drop CSV or click to browse</span>
+        </div>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Market</span>
+        <select class="text-input" id="market" required>
+          <option value="indian">Indian Market</option>
+          <option value="forex">Forex</option>
+          <option value="crypto">Crypto</option>
+        </select>
+      </label>
+
+      <div class="market-fields" id="indian-fields">
+        <label class="field">
+          <span class="field-label">Instrument</span>
+          <select class="text-input" id="instrument">
+            <option value="stock">Stock</option>
+            <option value="options">Options</option>
+            <option value="futures">Futures</option>
+          </select>
+        </label>
+
+        <label class="field" id="mode-field">
+          <span class="field-label">Mode</span>
+          <select class="text-input" id="mode">
+            <option value="intraday">Intraday</option>
+            <option value="swing">Swing</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Symbol</span>
+          <input class="text-input" type="text" id="indian-symbol" placeholder="RELIANCE" />
+        </label>
+      </div>
+
+      <div class="market-fields" id="forex-fields" hidden>
+        <label class="field">
+          <span class="field-label">Symbol</span>
+          <select class="text-input" id="forex-symbol" disabled>
+            <option value="XAUUSD" selected>XAUUSD — Gold</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="market-fields" id="crypto-fields" hidden>
+        <label class="field">
+          <span class="field-label">Symbol</span>
+          <select class="text-input" id="crypto-symbol">
+            <option value="BTC">BTC</option>
+            <option value="ETH">ETH</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="field">
+        <span class="field-label">Strategy</span>
+        <select class="text-input" id="strategy" name="strategy" required></select>
+      </label>
+
+      <div class="field-row">
+        <label class="field">
+          <span class="field-label">Initial Cash</span>
+          <input class="text-input" type="number" id="initial-cash" name="initial_cash" value="10000" min="0" step="100" />
+        </label>
+
+        <label class="field">
+          <span class="field-label">Timeframe</span>
+          <select class="text-input" id="timeframe" name="timeframe"></select>
+        </label>
+      </div>
+
+      <div class="field-row">
+        <label class="field">
+          <span class="field-label">Start Date</span>
+          <input class="text-input" type="text" id="start-date" placeholder="Select date" readonly />
+        </label>
+
+        <label class="field">
+          <span class="field-label">End Date</span>
+          <input class="text-input" type="text" id="end-date" placeholder="Select date" readonly />
+        </label>
+      </div>
+      <div class="field-hint">Leave blank to use the full uploaded file.</div>
+
+      <button type="submit" class="run-button" id="run-button">
+        <span>RUN BACKTEST</span>
+      </button>
+    </form>
+
+    <div id="error-box" class="error-box" hidden></div>
+
+    <div class="history-block">
+      <h3 class="card-title">Recent Runs</h3>
+      <div class="history-list" id="history-list">
+        <div class="history-empty">No runs yet.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel results-panel">
+    <h2 class="panel-title">Results</h2>
+
+    <div id="empty-state" class="empty-state">
+      <div class="empty-glyph">◇</div>
+      <p>Configure a run and execute it to see results here.</p>
+    </div>
+
+    <div id="results" class="results" hidden>
+      <div class="run-meta" id="run-meta"></div>
+      <div class="metrics-grid" id="metrics-grid"></div>
+
+      <div class="chart-card">
+        <h3 class="card-title">Equity Curve</h3>
+        <canvas id="equity-chart" height="90"></canvas>
+      </div>
+
+      <div class="trades-card">
+        <h3 class="card-title">Trade Log</h3>
+        <div class="trades-table-wrap">
+          <table class="trades-table" id="trades-table">
+            <thead>
+              <tr><th>Timestamp</th><th>Action</th><th>Qty</th><th>Price</th><th>Tag</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/flatpickr/4.6.13/flatpickr.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
