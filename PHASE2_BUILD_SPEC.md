@@ -10,11 +10,12 @@ modify it. Every stage below calls the same `load_ohlcv()` → `BacktestEngine` 
 core engine to change shape, that's a signal to stop and revisit
 `PHASE1_BUILD_SPEC.md` Section 3 first, not to quietly diverge.
 
-**Definition of done for the stages currently in scope (A–C)** — met: any number of
+**Definition of done for the stages currently in scope (A–D)** — met: any number of
 registered users can each upload data, run either reference strategy across
 Indian/Forex/Crypto instruments over an arbitrary date range, see results rendered
 correctly, and reload any of their own past runs from persisted history — with runs
-strictly private per account and no untrusted code ever executing server-side.
+strictly private per account, and the strategy-execution step itself running in an
+isolated, genuinely-killable subprocess rather than in-process.
 
 ---
 
@@ -44,6 +45,9 @@ webapp/
     main.py           # FastAPI app: routes, validation, wiring to backtest-core
     db.py             # SQLite persistence layer (users, sessions, runs)
     auth.py            # password hashing + session token helpers
+    strategy_registry.py  # shared strategy id -> class map (main.py + sandbox_worker.py)
+    sandbox.py             # subprocess-isolated strategy execution (Stage D)
+    sandbox_worker.py      # the actual isolated subprocess entry point
     pyproject.toml
     data/              # gitignored — results.db lives here
   frontend/
@@ -101,7 +105,15 @@ excludes every bar in the file returns 400 rather than silently running on nothi
 
 Response includes `run_id`, `bars_used`, `elapsed_seconds`, `metrics` (`total_return`,
 `sharpe`, `max_drawdown`, `win_rate`, `profit_factor` — same shape as the Phase 1 CLI's
-JSON schema), `trades[]`, `equity_curve[]`.
+JSON schema), `trades[]`, `equity_curve[]`. `elapsed_seconds` measures the full
+sandboxed subprocess round-trip (Stage D), not just in-process compute — it's
+meaningfully larger than Phase 1's own numbers because of that, by design.
+
+**Sandbox error responses** (Stage D): `504` if the strategy execution subprocess
+doesn't finish within `sandbox.DEFAULT_TIMEOUT_SECONDS` (30s) — the subprocess is
+killed either way, this isn't a "maybe still running" timeout; `500` if the subprocess
+exits non-zero for any other reason (a genuine strategy bug, for instance), with the
+worker's own error message surfaced in `detail`.
 
 **Honest limitation**: `instrument`/`mode` are metadata only. `backtest-core`'s engine
 is generic OHLCV bar simulation — selecting Options, Futures, Intraday, or Swing
@@ -262,13 +274,36 @@ click-to-reload.
   revisit once concurrent writers are a real scenario (Stage F's closed beta is the
   natural trigger)
 
-### Stage D — Sandboxing
-Container-per-job isolation (Docker), hard resource caps (CPU/memory/timeout/no
-network unless whitelisted), job queue feeding short-lived sandboxed workers. The
-`run_smoke_test()` timeout pattern from Phase 1 ticket 12 needs a real process/container
-kill here — a Python thread can't be force-terminated, which ticket 12's own docstring
-already flags as a known limitation. Must exist before Stage E lets anyone but you
-submit code.
+### Stage D — Sandboxing — **DONE (subprocess-based, not containers)**
+Scope decision made explicitly, not by default: Docker wasn't installed on the dev
+machine, and — more importantly — nothing untrusted actually executes yet (only the
+two built-in reference strategies), so full container-per-job isolation would have
+been infrastructure built ahead of the risk that justifies it. Built the lighter
+version instead, upgradeable later:
+
+- `sandbox_worker.py` — a standalone script that is the *only* place a strategy's
+  `on_bar()` ever executes; reads a job (`strategy_id`, `bars`, `initial_cash`) as
+  JSON on stdin, writes the result (or an error) as JSON on stdout
+- `sandbox.py` — `run_sandboxed()` spawns that script via `subprocess.run(...,
+  timeout=...)`. This is the real fix for the exact limitation Phase 1 ticket 12's
+  `run_smoke_test()` docstring already flagged: a Python thread can't be
+  force-terminated, but `subprocess.run`'s timeout genuinely kills the child process
+  before re-raising — verified directly (a 0.0001s timeout against real work raised
+  `SandboxTimeoutError` in 0.051s, confirming the child was actually killed, not just
+  abandoned)
+- `main.py`'s `/api/backtest` now serializes bars, calls `run_sandboxed()`, and
+  reconstructs `Trade`/`EquityPoint` objects from the JSON result — everything
+  downstream (metrics, persistence, response shape) is unchanged
+- `elapsed_seconds` (Stage C's metering) now measures the full subprocess round-trip,
+  which is honestly a better usage-metering number than pure in-process time was
+
+**Known gaps versus the original container-based plan** (deliberately not built yet,
+documented so they're not mistaken for done): no memory cap, no CPU cap, no network
+isolation — none of those are straightforward to enforce for a plain OS process on
+Windows without Docker or Windows Job Objects. **This subprocess version is not
+sufficient for Stage E.** The moment Stage E lets anyone but you submit strategy code,
+this needs to become the real container-per-job version — a stranger's code getting
+process isolation and a timeout is not the same guarantee as memory/CPU/network caps.
 
 ### Stage E — Multi-file strategy submission
 Accept a project (folder/zip/git URL) + manifest (entry point, language, dependencies,

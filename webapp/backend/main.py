@@ -1,11 +1,13 @@
-"""FastAPI backend for Phase 2 Stages A/B/C — a thin web wrapper around backtest-core,
-with results persisted to SQLite (Section 8.2) and scoped per authenticated user
-(Section 9's strategy-code-custody decision: runs are private-per-user, never shared).
+"""FastAPI backend for Phase 2 Stages A/B/C/D — a thin web wrapper around
+backtest-core, with results persisted to SQLite (Section 8.2), scoped per
+authenticated user (Section 9's strategy-code-custody decision), and with the
+strategy-execution step run in an isolated subprocess rather than in-process
+(Stage D — see sandbox.py for exactly what that isolation does and doesn't cover).
 
 No strategy upload here: only the two pre-built reference strategies are selectable
-via dropdown, and no user-submitted code executes. Sandboxing (Stage D) and custom
-strategy upload (Stage E) come later, in that order, per the architecture doc's
-Section 7.1/5.7 — this stage is intentionally safe to run with zero isolation.
+via dropdown, and no user-submitted code executes yet — that's Stage E, which needs
+the container-based version of the sandbox (not this subprocess-based one) before it
+can go live, per the architecture doc's Section 7.1/5.7.
 """
 
 import hashlib
@@ -19,7 +21,7 @@ from pathlib import Path
 import auth
 import db
 from data.loader import load_ohlcv
-from engine.engine import BacktestEngine
+from engine.engine import EquityPoint, Trade
 from engine.metrics import (
     ANNUALIZATION_FACTORS,
     max_drawdown,
@@ -29,17 +31,13 @@ from engine.metrics import (
     total_return,
     win_rate,
 )
+from engine.types import OrderAction
 from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from strategies.buy_and_hold import BuyAndHold
-from strategies.ma_crossover import MaCrossover
-
-AVAILABLE_STRATEGIES = {
-    "buy_and_hold": ("Buy & Hold", BuyAndHold),
-    "ma_crossover": ("MA(2)/MA(4) Crossover", MaCrossover),
-}
+from sandbox import DEFAULT_TIMEOUT_SECONDS, SandboxError, SandboxTimeoutError, run_sandboxed
+from strategy_registry import AVAILABLE_STRATEGIES
 
 # Market/instrument categorization is UI metadata for organizing runs — the engine
 # itself is instrument-agnostic OHLCV bar simulation regardless of what's picked here;
@@ -216,17 +214,56 @@ async def run_backtest_endpoint(
         if not bars:
             raise HTTPException(400, "no bars found in the selected date range")
 
-    strategy_name, strategy_cls = AVAILABLE_STRATEGIES[strategy]
+    strategy_name, _strategy_cls = AVAILABLE_STRATEGIES[strategy]
+    bars_payload = [
+        {
+            "timestamp": bar.timestamp.isoformat(),
+            "symbol": bar.symbol,
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "volume": bar.volume,
+        }
+        for bar in bars
+    ]
+
     started = time.monotonic()
-    result = BacktestEngine(strategy_cls(), initial_cash=initial_cash).run(bars)
+    try:
+        sandbox_result = run_sandboxed(
+            strategy, bars_payload, initial_cash, timeout_seconds=DEFAULT_TIMEOUT_SECONDS
+        )
+    except SandboxTimeoutError as exc:
+        raise HTTPException(504, str(exc)) from exc
+    except SandboxError as exc:
+        raise HTTPException(500, f"strategy execution failed: {exc}") from exc
     elapsed_seconds = time.monotonic() - started
 
-    pnls = realized_pnls(result.trades)
-    equity_values = [point.equity for point in result.equity_curve]
+    # reconstruct the same Trade/EquityPoint objects the in-process call used to
+    # produce, so everything downstream (metrics, response, persistence) is unchanged
+    trades = [
+        Trade(
+            timestamp=datetime.fromisoformat(t["timestamp"]),
+            symbol=t["symbol"],
+            action=OrderAction(t["action"]),
+            quantity=t["quantity"],
+            price=t["price"],
+            tag=t["tag"],
+        )
+        for t in sandbox_result["trades"]
+    ]
+    equity_curve = [
+        EquityPoint(timestamp=datetime.fromisoformat(p["timestamp"]), equity=p["equity"])
+        for p in sandbox_result["equity_curve"]
+    ]
+    final_equity = sandbox_result["final_equity"]
+
+    pnls = realized_pnls(trades)
+    equity_values = [point.equity for point in equity_curve]
     annualization_factor = ANNUALIZATION_FACTORS[timeframe]
 
     metrics_payload = {
-        "total_return": total_return(initial_cash, result.final_equity),
+        "total_return": total_return(initial_cash, final_equity),
         "sharpe": sharpe_ratio(equity_values, annualization_factor),
         "max_drawdown": max_drawdown(equity_values),
         "win_rate": win_rate(pnls),
@@ -240,11 +277,11 @@ async def run_backtest_endpoint(
             "price": trade.price,
             "tag": trade.tag,
         }
-        for trade in result.trades
+        for trade in trades
     ]
     equity_curve_payload = [
         {"timestamp": point.timestamp.isoformat(), "equity": point.equity}
-        for point in result.equity_curve
+        for point in equity_curve
     ]
 
     run_id = db.save_run(
@@ -263,7 +300,7 @@ async def run_backtest_endpoint(
             "start_date": start_date,
             "end_date": end_date,
         },
-        final_equity=result.final_equity,
+        final_equity=final_equity,
         metrics=metrics_payload,
         trades=trades_payload,
         equity_curve=equity_curve_payload,
@@ -281,7 +318,7 @@ async def run_backtest_endpoint(
         "data_version": data_version,
         "bars_used": len(bars),
         "elapsed_seconds": elapsed_seconds,
-        "final_equity": result.final_equity,
+        "final_equity": final_equity,
         "metrics": metrics_payload,
         "trades": trades_payload,
         "equity_curve": equity_curve_payload,
