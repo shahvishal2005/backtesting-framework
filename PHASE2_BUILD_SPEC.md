@@ -301,14 +301,21 @@ version instead, upgradeable later:
 documented so they're not mistaken for done): no memory cap, no CPU cap, no network
 isolation — none of those are straightforward to enforce for a plain OS process on
 Windows without Docker or Windows Job Objects. **This subprocess version is not
-sufficient for Stage E.** The moment Stage E lets anyone but you submit strategy code,
-this needs to become the real container-per-job version — a stranger's code getting
-process isolation and a timeout is not the same guarantee as memory/CPU/network caps.
+sufficient once real user-submitted code exists.** Installing Docker and upgrading
+`sandbox.py`/`sandbox_worker.py` to real container-per-job execution is explicitly
+deferred to **Phase 4** (see below) — not bundled into Stage E, and not done as a
+side effect of any other stage.
 
 ### Stage E — Multi-file strategy submission
 Accept a project (folder/zip/git URL) + manifest (entry point, language, dependencies,
 parameters) per the architecture doc's Section 5.7. Vetted-package allowlist for
 dependency installation. Immutable versioning per submission.
+
+**Sequencing note**: the manifest parsing, upload handling, and versioning in this
+stage can all be built and tested against the two existing trusted reference
+strategies without Docker. What this stage must *not* do is actually execute a
+stranger's uploaded code through the current subprocess-only sandbox — that step
+waits on Phase 4 landing first.
 
 ### Stage F — Closed beta, Python-only
 Open access to a small set of real outside users on the pure-Python path — explicitly
@@ -339,3 +346,25 @@ project — built last, once everything else is trusted.
 True tick-data replay for MQL/generic-code strategies, removing the intrabar-path
 assumption entirely. Never applies to Pine. Not started until the OHLC-based engine and
 its adapters are already trusted in production.
+
+---
+
+## 7. Phase 4 — full containerized sandboxing (deferred, not started)
+
+Install Docker Desktop, then upgrade Stage D's subprocess-based `sandbox.py` /
+`sandbox_worker.py` to real container-per-job execution: one throwaway container per
+run, hard memory/CPU caps, no network access unless explicitly whitelisted, a job
+queue feeding short-lived workers instead of a direct subprocess call.
+
+**Trigger condition, not a date**: this starts when Stage E is actually about to let
+someone other than you submit and execute strategy code — not before. Every stage up
+through E can be built and demoed against the two trusted reference strategies without
+it. Building the container infrastructure earlier than that would be exactly the
+"infrastructure ahead of the risk that justifies it" mistake Stage D's own scope
+decision was written to avoid.
+
+**What carries over unchanged**: `sandbox_worker.py`'s job contract (JSON in on stdin,
+JSON out on stdout) doesn't need to change — only *how* `sandbox.py` invokes it
+(`docker run` instead of `subprocess.run`) and what isolation wraps it. The
+`main.py` ↔ `sandbox.py` boundary established in Stage D is deliberately the seam
+this upgrade slots into.
