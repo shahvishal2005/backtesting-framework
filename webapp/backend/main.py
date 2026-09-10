@@ -1,13 +1,14 @@
-"""FastAPI backend for Phase 2 Stages A/B/C/D — a thin web wrapper around
+"""FastAPI backend for Phase 2 Stages A/B/C/D/E — a thin web wrapper around
 backtest-core, with results persisted to SQLite (Section 8.2), scoped per
 authenticated user (Section 9's strategy-code-custody decision), and with the
 strategy-execution step run in an isolated subprocess rather than in-process
 (Stage D — see sandbox.py for exactly what that isolation does and doesn't cover).
 
-No strategy upload here: only the two pre-built reference strategies are selectable
-via dropdown, and no user-submitted code executes yet — that's Stage E, which needs
-the container-based version of the sandbox (not this subprocess-based one) before it
-can go live, per the architecture doc's Section 7.1/5.7.
+Backtests still only ever run the two pre-built reference strategies via dropdown.
+Stage E adds project upload (manifest + zip, Section 5.7) — parsed, validated, and
+stored as immutable versions — but uploaded strategies are NOT executable yet: that
+needs the container-based sandbox (Phase 4), not Stage D's subprocess-only version.
+See strategy_upload.py's module docstring for why that boundary matters.
 """
 
 import hashlib
@@ -38,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sandbox import DEFAULT_TIMEOUT_SECONDS, SandboxError, SandboxTimeoutError, run_sandboxed
 from strategy_registry import AVAILABLE_STRATEGIES
+from strategy_upload import ManifestError, extract_project, parse_and_validate_zip
 
 # Market/instrument categorization is UI metadata for organizing runs — the engine
 # itself is instrument-agnostic OHLCV bar simulation regardless of what's picked here;
@@ -49,6 +51,7 @@ FOREX_SYMBOLS = ("XAUUSD",)
 CRYPTO_SYMBOLS = ("BTC", "ETH")
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+STRATEGIES_DIR = Path(__file__).parent / "data" / "strategies"
 CODE_VERSION = installed_version("backtest-core")
 
 
@@ -336,6 +339,60 @@ def get_run_endpoint(run_id: int, user: dict = Depends(require_user)):
     if run is None:
         raise HTTPException(404, f"no run with id {run_id}")
     return run
+
+
+@app.post("/api/uploaded-strategies")
+async def upload_strategy(
+    name: str = Form(...),
+    project_zip: UploadFile = ...,
+    user: dict = Depends(require_user),
+):
+    name = name.strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+
+    zip_bytes = await project_zip.read()
+    content_hash = hashlib.sha256(zip_bytes).hexdigest()[:16]
+
+    try:
+        manifest, zf = parse_and_validate_zip(zip_bytes)
+    except ManifestError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    version = db.next_strategy_version(user["id"], name)
+    storage_path = STRATEGIES_DIR / str(user["id"]) / name / str(version)
+    extract_project(zf, storage_path)
+    zf.close()
+
+    strategy_id = db.save_strategy(
+        user_id=user["id"],
+        name=name,
+        version=version,
+        content_hash=content_hash,
+        manifest=manifest,
+        storage_path=str(storage_path),
+    )
+
+    return {
+        "id": strategy_id,
+        "name": name,
+        "version": version,
+        "content_hash": content_hash,
+        "manifest": manifest,
+    }
+
+
+@app.get("/api/uploaded-strategies")
+def list_uploaded_strategies(user: dict = Depends(require_user)):
+    return db.list_strategies(user_id=user["id"])
+
+
+@app.get("/api/uploaded-strategies/{strategy_id}")
+def get_uploaded_strategy(strategy_id: int, user: dict = Depends(require_user)):
+    strategy = db.get_strategy(strategy_id, user_id=user["id"])
+    if strategy is None:
+        raise HTTPException(404, f"no strategy with id {strategy_id}")
+    return strategy
 
 
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

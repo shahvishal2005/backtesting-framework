@@ -1,4 +1,5 @@
-"""SQLite-backed persistence: users/sessions (Stage C) and results (Stage B).
+"""SQLite-backed persistence: users/sessions (Stage C), results (Stage B), and
+uploaded strategy projects (Stage E).
 
 Every run is tagged with its code version (the installed backtest-core version) and
 data version (a content hash of the uploaded file), so a stored result is traceable
@@ -6,6 +7,11 @@ back to exactly what produced it — Section 7.2's determinism requirement exten
 storage. Stage C adds user_id (every run belongs to exactly one user — runs are
 private-per-user, the strategy code custody decision Section 9 calls for) and
 elapsed_seconds (usage metering, tagged from day one per Section 9's other point).
+
+Stage E's `strategies` table stores each uploaded project as an immutable version
+(Section 5.7) — a re-upload under the same name gets the next version number rather
+than overwriting anything, so a past backtest result could always be traced back to
+the exact code that produced it, once execution is wired up in Phase 4.
 """
 
 import json
@@ -46,6 +52,18 @@ CREATE TABLE IF NOT EXISTS runs (
     trades TEXT NOT NULL,
     equity_curve TEXT NOT NULL,
     elapsed_seconds REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS strategies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    UNIQUE(user_id, name, version)
 );
 """
 
@@ -217,3 +235,64 @@ def usage_summary(user_id: int) -> dict:
             (user_id,),
         ).fetchone()
         return dict(row)
+
+
+# --- uploaded strategy projects (Stage E) --------------------------------------------
+
+
+def next_strategy_version(user_id: int, name: str) -> int:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT MAX(version) AS max_version FROM strategies WHERE user_id = ? AND name = ?",
+            (user_id, name),
+        ).fetchone()
+        return (row["max_version"] or 0) + 1
+
+
+def save_strategy(
+    user_id: int,
+    name: str,
+    version: int,
+    content_hash: str,
+    manifest: dict,
+    storage_path: str,
+) -> int:
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO strategies (user_id, name, version, created_at, content_hash, manifest, storage_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, name, version, _now_iso(), content_hash, json.dumps(manifest), storage_path),
+        )
+        return cursor.lastrowid
+
+
+def list_strategies(user_id: int) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, name, version, created_at, content_hash, manifest
+            FROM strategies WHERE user_id = ? ORDER BY name, version DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        results = []
+        for row in rows:
+            entry = dict(row)
+            entry["manifest"] = json.loads(entry["manifest"])
+            results.append(entry)
+        return results
+
+
+def get_strategy(strategy_id: int, user_id: int) -> dict | None:
+    """Same not-found/not-yours non-distinction as get_run — see its docstring."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM strategies WHERE id = ? AND user_id = ?", (strategy_id, user_id)
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["manifest"] = json.loads(result["manifest"])
+        return result

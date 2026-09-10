@@ -10,12 +10,15 @@ modify it. Every stage below calls the same `load_ohlcv()` → `BacktestEngine` 
 core engine to change shape, that's a signal to stop and revisit
 `PHASE1_BUILD_SPEC.md` Section 3 first, not to quietly diverge.
 
-**Definition of done for the stages currently in scope (A–D)** — met: any number of
+**Definition of done for the stages currently in scope (A–E)** — met: any number of
 registered users can each upload data, run either reference strategy across
 Indian/Forex/Crypto instruments over an arbitrary date range, see results rendered
 correctly, and reload any of their own past runs from persisted history — with runs
 strictly private per account, and the strategy-execution step itself running in an
-isolated, genuinely-killable subprocess rather than in-process.
+isolated, genuinely-killable subprocess rather than in-process. Users can also upload
+their own multi-file strategy projects, which are validated and stored as immutable
+private versions — but not yet executable; that capability is intentionally absent
+until Phase 4.
 
 ---
 
@@ -48,12 +51,16 @@ webapp/
     strategy_registry.py  # shared strategy id -> class map (main.py + sandbox_worker.py)
     sandbox.py             # subprocess-isolated strategy execution (Stage D)
     sandbox_worker.py      # the actual isolated subprocess entry point
+    strategy_upload.py     # manifest parsing/validation for uploads (Stage E) — never executes anything
     pyproject.toml
-    data/              # gitignored — results.db lives here
+    data/              # gitignored — results.db and strategies/ (extracted uploads) live here
   frontend/
     index.html
+    strategies.html       # Stage E: upload/browse uploaded strategy projects
     styles.css          # black/gold design system, see Section 6
     app.js
+    auth-client.js         # shared auth-gate logic — both pages include this before their own script
+    strategies.js
   README.md
 ```
 
@@ -62,7 +69,7 @@ pattern would have also matched `backtest-core/data/`, the real source package).
 
 ---
 
-## 3. API reference (current, Stages A–C)
+## 3. API reference (current, Stages A–E)
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
@@ -70,11 +77,14 @@ pattern would have also matched `backtest-core/data/`, the real source package).
 | POST | `/api/auth/login` | no | `{email, password}` → starts session |
 | POST | `/api/auth/logout` | no | invalidates the current session server-side, clears cookie |
 | GET | `/api/auth/me` | yes | `{email, usage: {job_count, total_seconds}}`; 401 if not signed in — the frontend's own auth check on load |
-| GET | `/api/strategies` | no | `[{id, name}]` — the reference strategies selectable via dropdown |
+| GET | `/api/strategies` | no | `[{id, name}]` — the **built-in** reference strategies selectable to actually run |
 | GET | `/api/timeframes` | no | `["15min", "1min", "daily", "hourly"]` — for the Sharpe annualization factor |
 | POST | `/api/backtest` | yes | Runs a backtest; see request/response shape below |
 | GET | `/api/runs?limit=50` | yes | Summary list of **the current user's own** persisted runs, newest first |
 | GET | `/api/runs/{id}` | yes | Full detail for one run — 404 (not 403) if it doesn't exist *or* belongs to another user, so existence can't be inferred either way |
+| POST | `/api/uploaded-strategies` | yes | `name` + `project_zip` multipart form → validates, stores, returns `{id, name, version, content_hash, manifest}`. **Does not execute anything.** |
+| GET | `/api/uploaded-strategies` | yes | List the current user's own uploaded strategies (all versions) |
+| GET | `/api/uploaded-strategies/{id}` | yes | Full detail for one uploaded strategy — same not-found/not-yours 404 non-distinction as `/api/runs/{id}` |
 
 **Auth**: session-cookie based, not JWT — `sessions` is a real table (`token`, `user_id`,
 `expires_at`), so logout and revocation are just a `DELETE`, not a signing-key rotation.
@@ -121,6 +131,38 @@ categorizes a run for display/history purposes but does not currently change how
 backtest computes (no options pricing, no futures margin/contract handling, no
 session-aware intraday execution). This should be made explicit again wherever this
 spec is read out of context, so it never gets silently assumed to be implemented.
+
+**POST `/api/uploaded-strategies`** — multipart form: `name` (string) + `project_zip`
+(a `.zip`, ≤5MB, with `manifest.json` at its root). Manifest schema (Section 5.7):
+
+```json
+{
+  "entry_point": "strategy.py:MyStrategy",
+  "language": "python",
+  "dependencies": ["numpy>=1.26"],
+  "parameters": {"lookback": 20}
+}
+```
+
+Validation (`strategy_upload.py`, all 400 with a specific message, not a generic
+failure): `manifest.json` must exist and parse as JSON; `entry_point` must match
+`file.py:ClassName` and that file must actually be in the zip; `language` must be
+`"python"` (MQL/Pine rejected with a message pointing at Section 5.3/5.4 — they're
+future adapter work, not supported yet); every entry in `dependencies` must resolve
+to a name in the allowlist (`numpy`, `pandas` today — deliberately small per Section
+5.7's "dependency installation is a security surface"); `parameters` must be an
+object if present. A non-zip or corrupt zip is rejected before any of that runs.
+
+Each upload gets the next integer version for that `(user, name)` pair — a re-upload
+under the same name never overwrites a prior version; both are stored on disk under
+`data/strategies/<user_id>/<name>/<version>/`, extracted via `zipfile.extractall()`.
+**Verified directly** (not assumed) that this stdlib call is zip-slip-safe on this
+Python version: a crafted entry named `../../evil.txt` was extracted as `evil.txt`
+*inside* the target directory, not escaping it.
+
+**What this endpoint deliberately does not do**: execute any of the uploaded code, in
+any form, ever. There is currently no "run this uploaded strategy" endpoint at all —
+that capability doesn't exist yet and won't until Phase 4's container sandbox lands.
 
 ---
 
@@ -181,9 +223,29 @@ rows were synthetic test data from development, not anything worth preserving. A
 migration script will be needed the first time this schema changes after real user
 data exists.
 
+**Stage E adds `strategies`**:
+
+```sql
+CREATE TABLE strategies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL,        -- next integer per (user_id, name); never reused
+    created_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL,      -- sha256(zip bytes)[:16]
+    manifest TEXT NOT NULL,          -- JSON: entry_point, language, dependencies, parameters
+    storage_path TEXT NOT NULL,      -- data/strategies/<user_id>/<name>/<version>/
+    UNIQUE(user_id, name, version)
+);
+```
+
+Same private-per-user pattern as `runs`: `db.get_strategy(strategy_id, user_id)`
+returns `None` for both "doesn't exist" and "belongs to someone else" — verified with
+two accounts the same way `runs` isolation was (Stage C).
+
 ---
 
-## 5. Frontend design system (Stages A–C)
+## 5. Frontend design system (Stages A–E)
 
 **Palette** (CSS custom properties in `styles.css`): near-black background (`#060608`),
 gold accent (`#d9b556` / bright `#f3cf72`), muted warm grays for secondary text, green
@@ -217,6 +279,16 @@ shown whenever `GET /api/auth/me` returns 401 — blocks the entire app behind a
 Sign In / Create Account card until a session exists, toggled by one link rather than
 two separate routes. On success the header's right side switches from nothing to the
 signed-in user's email + a Logout button.
+
+**Multi-page structure (Stage E)**: `strategies.html` is a second page (own top-nav
+link, active-state underline matching the current page), not a section bolted onto
+`index.html` — upload/manage is a different enough workflow from run/view-results to
+earn its own page. Adding it required factoring the auth-gate logic (login/register
+form handling, session check, logout) out of `app.js` into `auth-client.js`, shared by
+both pages: each page sets `window.onAuthenticated = async (email) => {...}` for its
+own post-login init (load backtest options vs. load the strategy list) before calling
+the shared `checkAuth()`. Verified the refactor didn't regress `index.html` by running
+its full flow again afterward, not just testing the new page in isolation.
 
 ### Bugs found and fixed during Stages A–C (worth knowing before touching this code)
 
@@ -306,16 +378,28 @@ sufficient once real user-submitted code exists.** Installing Docker and upgradi
 deferred to **Phase 4** (see below) — not bundled into Stage E, and not done as a
 side effect of any other stage.
 
-### Stage E — Multi-file strategy submission
-Accept a project (folder/zip/git URL) + manifest (entry point, language, dependencies,
-parameters) per the architecture doc's Section 5.7. Vetted-package allowlist for
-dependency installation. Immutable versioning per submission.
+### Stage E — Multi-file strategy submission — **DONE (upload/storage only, execution deferred)**
+Built exactly to the sequencing note: zip + `manifest.json` upload, full validation
+(`strategy_upload.py`), a vetted dependency allowlist, and immutable per-`(user, name)`
+versioning — all working and tested against real uploads — with **no path to actually
+running any of it**. There is no "run this uploaded strategy" endpoint; that only
+exists for the two built-in reference strategies.
 
-**Sequencing note**: the manifest parsing, upload handling, and versioning in this
-stage can all be built and tested against the two existing trusted reference
-strategies without Docker. What this stage must *not* do is actually execute a
-stranger's uploaded code through the current subprocess-only sandbox — that step
-waits on Phase 4 landing first.
+- Manifest: `entry_point` (`file.py:ClassName`), `language` (`python` only — MQL/Pine
+  rejected with a message pointing at Section 5.3/5.4, not supported yet),
+  `dependencies` (must all be on the allowlist: `numpy`, `pandas`), optional
+  `parameters` object
+- Zip-slip safety was **verified, not assumed**: crafted a zip with a `../../evil.txt`
+  entry and confirmed `zipfile.extractall()` on this Python version writes it inside
+  the target directory, not escaping it
+- Tested every rejection path individually (missing manifest, disallowed dependency,
+  unsupported language, missing entry-point file, corrupt zip, oversized zip) plus the
+  same cross-user isolation pattern as `runs` — a second account gets a 404 for
+  another user's strategy, not their data and not a 403 that would confirm it exists
+- New page `strategies.html` (not a tab on the existing page — upload/manage is a
+  distinct enough workflow), which required extracting the auth-gate logic out of
+  `app.js` into a shared `auth-client.js` so both pages get identical login/session
+  behavior without duplicating it
 
 ### Stage F — Closed beta, Python-only
 Open access to a small set of real outside users on the pure-Python path — explicitly

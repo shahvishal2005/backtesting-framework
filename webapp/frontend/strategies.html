@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Strategy Library — Backtest Core</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="bg-grid"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">◆</span>
+    <span class="brand-name">BACKTEST<span class="accent">CORE</span></span>
+  </div>
+  <div class="brand-sub">strategy library — phase 2, stage e</div>
+  <nav class="top-nav">
+    <a href="index.html" class="nav-link">Run Backtest</a>
+    <a href="strategies.html" class="nav-link active">Strategy Library</a>
+  </nav>
+  <div class="user-info" id="user-info" hidden>
+    <span class="user-email" id="user-email"></span>
+    <button class="logout-button" id="logout-button">Logout</button>
+  </div>
+</header>
+
+<div class="auth-gate" id="auth-gate" hidden>
+  <div class="auth-card">
+    <div class="brand" style="margin-bottom: 24px;">
+      <span class="brand-mark">◆</span>
+      <span class="brand-name">BACKTEST<span class="accent">CORE</span></span>
+    </div>
+    <h2 class="panel-title" id="auth-title">Sign In</h2>
+    <form id="auth-form">
+      <label class="field">
+        <span class="field-label">Email</span>
+        <input class="text-input" type="email" id="auth-email" required />
+      </label>
+      <label class="field">
+        <span class="field-label">Password</span>
+        <input class="text-input" type="password" id="auth-password" required minlength="8" />
+      </label>
+      <button type="submit" class="run-button" id="auth-submit"><span>SIGN IN</span></button>
+    </form>
+    <div id="auth-error" class="error-box" hidden></div>
+    <p class="auth-toggle">
+      <span id="auth-toggle-text">Need an account?</span>
+      <a href="#" id="auth-toggle-link">Register</a>
+    </p>
+  </div>
+</div>
+
+<main class="layout single-col" id="main-layout" hidden>
+  <section class="panel">
+    <h2 class="panel-title">Upload Strategy</h2>
+    <div class="notice-box">
+      Uploaded projects are validated and stored as immutable versions here, but
+      <strong>not executable yet</strong> — running uploaded code needs
+      container-based sandboxing (Phase 4), which isn't built. This stage exists so
+      that work isn't wasted once it lands.
+    </div>
+
+    <form id="upload-form">
+      <label class="field">
+        <span class="field-label">Strategy Name</span>
+        <input class="text-input" type="text" id="strategy-name" placeholder="my-momentum-strategy" required />
+      </label>
+
+      <label class="field">
+        <span class="field-label">Project (.zip, manifest.json at the root)</span>
+        <div class="file-drop" id="file-drop">
+          <input type="file" id="project-zip" accept=".zip" required />
+          <span id="file-drop-text">Drop ZIP or click to browse</span>
+        </div>
+      </label>
+
+      <button type="submit" class="run-button" id="upload-button"><span>UPLOAD</span></button>
+    </form>
+    <div id="upload-error" class="error-box" hidden></div>
+    <div id="upload-success" class="success-box" hidden></div>
+
+    <div class="manifest-example">
+      <h3 class="card-title">manifest.json</h3>
+      <pre>{
+  "entry_point": "strategy.py:MyStrategy",
+  "language": "python",
+  "dependencies": ["numpy&gt;=1.26"],
+  "parameters": {"lookback": 20}
+}</pre>
+      <p class="field-hint">Allowed dependencies: numpy, pandas. Python only — MQL/Pine are future adapter work.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2 class="panel-title">My Strategies</h2>
+    <div id="strategies-list" class="strategies-list">
+      <div class="history-empty">No strategies uploaded yet.</div>
+    </div>
+  </section>
+</main>
+
+<script src="auth-client.js"></script>
+<script src="strategies.js"></script>
+</body>
+</html>
